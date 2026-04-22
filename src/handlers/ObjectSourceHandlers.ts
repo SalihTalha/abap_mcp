@@ -7,12 +7,26 @@ export class ObjectSourceHandlers extends BaseHandler {
     return [
       {
         name: 'getObjectSource',
-        description: 'Retrieves source code for ABAP objects',
+        description: [
+          'Retrieves source code for ABAP objects.',
+          'Supports chunked reading for large files via the optional chunkSize and chunkIndex parameters.',
+          'When chunkSize is provided the response includes chunking metadata (chunked, chunkIndex,',
+          'totalSize, totalChunks, hasMore). Omit chunkSize to receive the full source in one call',
+          '(only suitable for small files).',
+        ].join(' '),
         inputSchema: {
           type: 'object',
           properties: {
             objectSourceUrl: { type: 'string' },
-            options: { type: 'string' }
+            options: { type: 'string' },
+            chunkSize: {
+              type: 'number',
+              description: 'Maximum number of characters per chunk. Omit to return the full source.',
+            },
+            chunkIndex: {
+              type: 'number',
+              description: 'Zero-based index of the chunk to return. Defaults to 0.',
+            },
           },
           required: ['objectSourceUrl']
         }
@@ -46,21 +60,49 @@ export class ObjectSourceHandlers extends BaseHandler {
   }
 
   async handleGetObjectSource(args: any): Promise<any> {
-    
     const startTime = performance.now();
+    const { objectSourceUrl, options, chunkSize, chunkIndex = 0 } = args;
+
+    if (chunkSize !== undefined) {
+      if (typeof chunkSize !== 'number' || chunkSize <= 0) {
+        throw new McpError(ErrorCode.InternalError, 'chunkSize must be a positive number');
+      }
+      if (typeof chunkIndex !== 'number' || chunkIndex < 0) {
+        throw new McpError(ErrorCode.InternalError, 'chunkIndex must be a non-negative integer');
+      }
+    }
+
     try {
-      const source = await this.adtclient.getObjectSource(args.objectSourceUrl, args.options);
+      const source = await this.adtclient.getObjectSource(objectSourceUrl, options);
       this.trackRequest(startTime, true);
+
+      if (chunkSize === undefined) {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ status: 'success', source }) }]
+        };
+      }
+
+      const totalSize = source.length;
+      const totalChunks = Math.max(1, Math.ceil(totalSize / chunkSize));
+      const start = chunkIndex * chunkSize;
+      const chunk = source.slice(start, start + chunkSize);
+      const hasMore = chunkIndex < totalChunks - 1;
+
       return {
         content: [
           {
             type: 'text',
             text: JSON.stringify({
               status: 'success',
-              source
-            })
-          }
-        ]
+              source: chunk,
+              chunked: true,
+              chunkIndex,
+              totalSize,
+              totalChunks,
+              hasMore,
+            }),
+          },
+        ],
       };
     } catch (error: any) {
       this.trackRequest(startTime, false);
