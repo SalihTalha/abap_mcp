@@ -22,8 +22,8 @@ describe('ObjectSourceHandlers – tool definitions', () => {
   const handler = new ObjectSourceHandlers(makeMockClient());
   const tools = handler.getTools();
 
-  it('exports exactly two tools', () => {
-    expect(tools).toHaveLength(2);
+  it('exports exactly three tools', () => {
+    expect(tools).toHaveLength(3);
   });
 
   it('exports getObjectSource with correct shape', () => {
@@ -378,5 +378,436 @@ describe('getObjectSource – chunked behavior', () => {
     // They must NOT appear in required
     expect(tool.inputSchema.required).not.toContain('chunkSize');
     expect(tool.inputSchema.required).not.toContain('chunkIndex');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Shared fixture for patch tests
+// ---------------------------------------------------------------------------
+
+const PATCH_SOURCE = [
+  'REPORT z_demo.',                          // line 1
+  '',                                        // line 2
+  'DATA: lv_rate TYPE p DECIMALS 2.',        // line 3
+  'DATA: lv_amount TYPE p DECIMALS 2.',      // line 4
+  'DATA: lv_result TYPE p DECIMALS 2.',      // line 5
+  '',                                        // line 6
+  'START-OF-SELECTION.',                     // line 7
+  '  lv_rate   = \'0.19\'.',                 // line 8
+  '  lv_amount = 1000.',                     // line 9
+  '  lv_result = lv_amount * lv_rate.',      // line 10
+  '  WRITE lv_result.',                      // line 11
+].join('\n');
+
+function makePatchClient(source = PATCH_SOURCE) {
+  return makeMockClient({
+    getObjectSource: jest.fn().mockResolvedValue(source),
+    setObjectSource: jest.fn().mockResolvedValue(undefined),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// patchObjectSource – tool definition
+// ---------------------------------------------------------------------------
+
+describe('patchObjectSource – tool definition', () => {
+  it('is exported as a third tool', () => {
+    const handler = new ObjectSourceHandlers(makeMockClient());
+    const tools = handler.getTools();
+    expect(tools).toHaveLength(3);
+    const tool = tools.find(t => t.name === 'patchObjectSource');
+    expect(tool).toBeDefined();
+  });
+
+  it('requires objectSourceUrl and lockHandle', () => {
+    const handler = new ObjectSourceHandlers(makeMockClient());
+    const tool = handler.getTools().find(t => t.name === 'patchObjectSource')!;
+    expect(tool.inputSchema.required).toContain('objectSourceUrl');
+    expect(tool.inputSchema.required).toContain('lockHandle');
+  });
+
+  it('transport is optional', () => {
+    const handler = new ObjectSourceHandlers(makeMockClient());
+    const tool = handler.getTools().find(t => t.name === 'patchObjectSource')!;
+    expect(tool.inputSchema.required).not.toContain('transport');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// patchObjectSource – lineChanges (patch type 1)
+// ---------------------------------------------------------------------------
+
+describe('patchObjectSource – lineChanges', () => {
+  it('replaces a single line by 1-based line number', async () => {
+    const client = makePatchClient();
+    const handler = new ObjectSourceHandlers(client);
+
+    const result = await handler.handle('patchObjectSource', {
+      objectSourceUrl: '/any/url',
+      lockHandle: 'lock-1',
+      lineChanges: [{ lineNumber: 8, newContent: "  lv_rate   = '0.21'." }],
+    });
+
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.status).toBe('success');
+    expect(parsed.linesChanged).toBe(1);
+
+    const written = (client.setObjectSource as jest.Mock).mock.calls[0][1] as string;
+    const lines = written.split('\n');
+    expect(lines[7]).toBe("  lv_rate   = '0.21'.");   // 0-indexed → line 8
+  });
+
+  it('applies multiple lineChanges in a single write', async () => {
+    const client = makePatchClient();
+    const handler = new ObjectSourceHandlers(client);
+
+    await handler.handle('patchObjectSource', {
+      objectSourceUrl: '/any/url',
+      lockHandle: 'lock-1',
+      lineChanges: [
+        { lineNumber: 8,  newContent: "  lv_rate   = '0.21'." },
+        { lineNumber: 9,  newContent: '  lv_amount = 2000.' },
+      ],
+    });
+
+    const written = (client.setObjectSource as jest.Mock).mock.calls[0][1] as string;
+    const lines = written.split('\n');
+    expect(lines[7]).toBe("  lv_rate   = '0.21'.");
+    expect(lines[8]).toBe('  lv_amount = 2000.');
+    // setObjectSource called exactly once — not once per change
+    expect(client.setObjectSource).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves all unchanged lines', async () => {
+    const client = makePatchClient();
+    const handler = new ObjectSourceHandlers(client);
+
+    await handler.handle('patchObjectSource', {
+      objectSourceUrl: '/any/url',
+      lockHandle: 'lock-1',
+      lineChanges: [{ lineNumber: 8, newContent: "  lv_rate = '0.21'." }],
+    });
+
+    const written = (client.setObjectSource as jest.Mock).mock.calls[0][1] as string;
+    const lines = written.split('\n');
+    expect(lines[0]).toBe('REPORT z_demo.');
+    expect(lines[10]).toBe('  WRITE lv_result.');
+  });
+
+  it('throws when lineNumber is out of range', async () => {
+    const handler = new ObjectSourceHandlers(makePatchClient());
+
+    await expect(handler.handle('patchObjectSource', {
+      objectSourceUrl: '/any/url',
+      lockHandle: 'lock-1',
+      lineChanges: [{ lineNumber: 999, newContent: 'X' }],
+    })).rejects.toMatchObject({ code: ErrorCode.InternalError });
+  });
+
+  it('throws when lineNumber is less than 1', async () => {
+    const handler = new ObjectSourceHandlers(makePatchClient());
+
+    await expect(handler.handle('patchObjectSource', {
+      objectSourceUrl: '/any/url',
+      lockHandle: 'lock-1',
+      lineChanges: [{ lineNumber: 0, newContent: 'X' }],
+    })).rejects.toMatchObject({ code: ErrorCode.InternalError });
+  });
+
+  it('passes lockHandle and transport to setObjectSource', async () => {
+    const client = makePatchClient();
+    const handler = new ObjectSourceHandlers(client);
+
+    await handler.handle('patchObjectSource', {
+      objectSourceUrl: '/any/url',
+      lockHandle: 'lock-abc',
+      transport: 'DEVK900001',
+      lineChanges: [{ lineNumber: 1, newContent: 'REPORT z_new.' }],
+    });
+
+    expect(client.setObjectSource).toHaveBeenCalledWith(
+      '/any/url',
+      expect.any(String),
+      'lock-abc',
+      'DEVK900001',
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// patchObjectSource – searchReplace (patch type 2)
+// ---------------------------------------------------------------------------
+
+describe('patchObjectSource – searchReplace', () => {
+  it('replaces the first occurrence of a search string', async () => {
+    const client = makePatchClient();
+    const handler = new ObjectSourceHandlers(client);
+
+    const result = await handler.handle('patchObjectSource', {
+      objectSourceUrl: '/any/url',
+      lockHandle: 'lock-1',
+      searchReplace: [{ search: "'0.19'", replacement: "'0.21'" }],
+    });
+
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.status).toBe('success');
+
+    const written = (client.setObjectSource as jest.Mock).mock.calls[0][1] as string;
+    expect(written).toContain("'0.21'");
+    expect(written).not.toContain("'0.19'");
+  });
+
+  it('replaces all occurrences when replaceAll is true', async () => {
+    const source = 'A = 1.\nB = 1.\nC = 1.';
+    const client = makePatchClient(source);
+    const handler = new ObjectSourceHandlers(client);
+
+    await handler.handle('patchObjectSource', {
+      objectSourceUrl: '/any/url',
+      lockHandle: 'lock-1',
+      searchReplace: [{ search: '1', replacement: '2', replaceAll: true }],
+    });
+
+    const written = (client.setObjectSource as jest.Mock).mock.calls[0][1] as string;
+    expect(written).toBe('A = 2.\nB = 2.\nC = 2.');
+  });
+
+  it('replaces only the first occurrence by default (replaceAll omitted)', async () => {
+    const source = 'A = 1.\nB = 1.\nC = 1.';
+    const client = makePatchClient(source);
+    const handler = new ObjectSourceHandlers(client);
+
+    await handler.handle('patchObjectSource', {
+      objectSourceUrl: '/any/url',
+      lockHandle: 'lock-1',
+      searchReplace: [{ search: '1', replacement: '9' }],
+    });
+
+    const written = (client.setObjectSource as jest.Mock).mock.calls[0][1] as string;
+    expect(written).toBe('A = 9.\nB = 1.\nC = 1.');
+  });
+
+  it('applies multiple search-replace operations in order', async () => {
+    const client = makePatchClient();
+    const handler = new ObjectSourceHandlers(client);
+
+    await handler.handle('patchObjectSource', {
+      objectSourceUrl: '/any/url',
+      lockHandle: 'lock-1',
+      searchReplace: [
+        { search: "'0.19'", replacement: "'0.21'" },
+        { search: '1000', replacement: '2000' },
+      ],
+    });
+
+    const written = (client.setObjectSource as jest.Mock).mock.calls[0][1] as string;
+    expect(written).toContain("'0.21'");
+    expect(written).toContain('2000');
+    expect(client.setObjectSource).toHaveBeenCalledTimes(1);
+  });
+
+  it('throws with a clear message when search string is not found', async () => {
+    const handler = new ObjectSourceHandlers(makePatchClient());
+
+    await expect(handler.handle('patchObjectSource', {
+      objectSourceUrl: '/any/url',
+      lockHandle: 'lock-1',
+      searchReplace: [{ search: 'THIS_DOES_NOT_EXIST', replacement: 'X' }],
+    })).rejects.toMatchObject({
+      code: ErrorCode.InternalError,
+      message: expect.stringContaining('THIS_DOES_NOT_EXIST'),
+    });
+  });
+
+  it('does not call setObjectSource when search is not found', async () => {
+    const client = makePatchClient();
+    const handler = new ObjectSourceHandlers(client);
+
+    await expect(handler.handle('patchObjectSource', {
+      objectSourceUrl: '/any/url',
+      lockHandle: 'lock-1',
+      searchReplace: [{ search: 'NOT_THERE', replacement: 'X' }],
+    })).rejects.toThrow();
+
+    expect(client.setObjectSource).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// patchObjectSource – rangeChange (patch type 3)
+// ---------------------------------------------------------------------------
+
+describe('patchObjectSource – rangeChange', () => {
+  it('replaces a range of lines with new content', async () => {
+    const client = makePatchClient();
+    const handler = new ObjectSourceHandlers(client);
+
+    const result = await handler.handle('patchObjectSource', {
+      objectSourceUrl: '/any/url',
+      lockHandle: 'lock-1',
+      rangeChange: {
+        startLine: 8,
+        endLine: 10,
+        newContent: "  lv_rate   = '0.21'.\n  lv_amount = 2000.\n  lv_result = lv_amount * lv_rate.",
+      },
+    });
+
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.status).toBe('success');
+
+    const written = (client.setObjectSource as jest.Mock).mock.calls[0][1] as string;
+    const lines = written.split('\n');
+    expect(lines[7]).toBe("  lv_rate   = '0.21'.");
+    expect(lines[8]).toBe('  lv_amount = 2000.');
+    expect(lines[9]).toBe('  lv_result = lv_amount * lv_rate.');
+  });
+
+  it('preserves lines before the range', async () => {
+    const client = makePatchClient();
+    const handler = new ObjectSourceHandlers(client);
+
+    await handler.handle('patchObjectSource', {
+      objectSourceUrl: '/any/url',
+      lockHandle: 'lock-1',
+      rangeChange: { startLine: 8, endLine: 10, newContent: 'REPLACED' },
+    });
+
+    const written = (client.setObjectSource as jest.Mock).mock.calls[0][1] as string;
+    const lines = written.split('\n');
+    expect(lines[0]).toBe('REPORT z_demo.');   // line 1 untouched
+    expect(lines[6]).toBe('START-OF-SELECTION.');  // line 7 untouched
+  });
+
+  it('preserves lines after the range', async () => {
+    const client = makePatchClient();
+    const handler = new ObjectSourceHandlers(client);
+
+    await handler.handle('patchObjectSource', {
+      objectSourceUrl: '/any/url',
+      lockHandle: 'lock-1',
+      rangeChange: { startLine: 8, endLine: 10, newContent: 'REPLACED' },
+    });
+
+    const written = (client.setObjectSource as jest.Mock).mock.calls[0][1] as string;
+    const lines = written.split('\n');
+    expect(lines[lines.length - 1]).toBe('  WRITE lv_result.');  // line 11 untouched
+  });
+
+  it('can replace a single line via range (startLine === endLine)', async () => {
+    const client = makePatchClient();
+    const handler = new ObjectSourceHandlers(client);
+
+    await handler.handle('patchObjectSource', {
+      objectSourceUrl: '/any/url',
+      lockHandle: 'lock-1',
+      rangeChange: { startLine: 1, endLine: 1, newContent: 'REPORT z_replaced.' },
+    });
+
+    const written = (client.setObjectSource as jest.Mock).mock.calls[0][1] as string;
+    expect(written.split('\n')[0]).toBe('REPORT z_replaced.');
+  });
+
+  it('throws when startLine > endLine', async () => {
+    const handler = new ObjectSourceHandlers(makePatchClient());
+
+    await expect(handler.handle('patchObjectSource', {
+      objectSourceUrl: '/any/url',
+      lockHandle: 'lock-1',
+      rangeChange: { startLine: 10, endLine: 5, newContent: 'X' },
+    })).rejects.toMatchObject({ code: ErrorCode.InternalError });
+  });
+
+  it('throws when startLine is less than 1', async () => {
+    const handler = new ObjectSourceHandlers(makePatchClient());
+
+    await expect(handler.handle('patchObjectSource', {
+      objectSourceUrl: '/any/url',
+      lockHandle: 'lock-1',
+      rangeChange: { startLine: 0, endLine: 5, newContent: 'X' },
+    })).rejects.toMatchObject({ code: ErrorCode.InternalError });
+  });
+
+  it('throws when endLine exceeds total lines', async () => {
+    const handler = new ObjectSourceHandlers(makePatchClient());
+
+    await expect(handler.handle('patchObjectSource', {
+      objectSourceUrl: '/any/url',
+      lockHandle: 'lock-1',
+      rangeChange: { startLine: 1, endLine: 9999, newContent: 'X' },
+    })).rejects.toMatchObject({ code: ErrorCode.InternalError });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// patchObjectSource – mutual exclusion and validation
+// ---------------------------------------------------------------------------
+
+describe('patchObjectSource – input validation', () => {
+  it('throws when no patch type is provided', async () => {
+    const handler = new ObjectSourceHandlers(makePatchClient());
+
+    await expect(handler.handle('patchObjectSource', {
+      objectSourceUrl: '/any/url',
+      lockHandle: 'lock-1',
+    })).rejects.toMatchObject({ code: ErrorCode.InternalError });
+  });
+
+  it('throws when more than one patch type is provided', async () => {
+    const handler = new ObjectSourceHandlers(makePatchClient());
+
+    await expect(handler.handle('patchObjectSource', {
+      objectSourceUrl: '/any/url',
+      lockHandle: 'lock-1',
+      lineChanges:  [{ lineNumber: 1, newContent: 'X' }],
+      searchReplace: [{ search: 'A', replacement: 'B' }],
+    })).rejects.toMatchObject({ code: ErrorCode.InternalError });
+  });
+
+  it('returns totalLines in the success response', async () => {
+    const client = makePatchClient();
+    const handler = new ObjectSourceHandlers(client);
+
+    const result = await handler.handle('patchObjectSource', {
+      objectSourceUrl: '/any/url',
+      lockHandle: 'lock-1',
+      lineChanges: [{ lineNumber: 1, newContent: 'REPORT z_x.' }],
+    });
+
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.totalLines).toBe(11);
+  });
+
+  it('propagates ADTClient read errors as McpError(InternalError)', async () => {
+    const client = makeMockClient({
+      getObjectSource: jest.fn().mockRejectedValue(new Error('read failed')),
+      setObjectSource: jest.fn(),
+    });
+    const handler = new ObjectSourceHandlers(client);
+
+    await expect(handler.handle('patchObjectSource', {
+      objectSourceUrl: '/any/url',
+      lockHandle: 'lock-1',
+      lineChanges: [{ lineNumber: 1, newContent: 'X' }],
+    })).rejects.toMatchObject({
+      code: ErrorCode.InternalError,
+      message: expect.stringContaining('read failed'),
+    });
+  });
+
+  it('propagates ADTClient write errors as McpError(InternalError)', async () => {
+    const client = makeMockClient({
+      getObjectSource: jest.fn().mockResolvedValue(PATCH_SOURCE),
+      setObjectSource: jest.fn().mockRejectedValue(new Error('write failed')),
+    });
+    const handler = new ObjectSourceHandlers(client);
+
+    await expect(handler.handle('patchObjectSource', {
+      objectSourceUrl: '/any/url',
+      lockHandle: 'lock-1',
+      lineChanges: [{ lineNumber: 1, newContent: 'X' }],
+    })).rejects.toMatchObject({
+      code: ErrorCode.InternalError,
+      message: expect.stringContaining('write failed'),
+    });
   });
 });
