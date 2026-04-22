@@ -209,6 +209,27 @@ describe('setObjectSource – baseline behavior', () => {
 });
 
 // ---------------------------------------------------------------------------
+// getObjectSource – response stays within 1 MB MCP limit when chunked
+// ---------------------------------------------------------------------------
+
+describe('getObjectSource – response size with chunking', () => {
+  it('a single chunk of 50 000 chars stays well under 1 MB', async () => {
+    const source = 'X'.repeat(500_000);
+    const client = makeMockClient({ getObjectSource: jest.fn().mockResolvedValue(source) });
+    const handler = new ObjectSourceHandlers(client);
+
+    const result = await handler.handle('getObjectSource', {
+      objectSourceUrl: '/any/url',
+      chunkSize: 50_000,
+      chunkIndex: 0,
+    });
+
+    const text = result.content[0].text;
+    expect(Buffer.byteLength(text, 'utf8')).toBeLessThan(900 * 1024);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // getObjectSource – CHUNKED behavior
 // ---------------------------------------------------------------------------
 

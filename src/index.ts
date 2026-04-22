@@ -126,15 +126,28 @@ export class AbapAdtServer extends Server {
     this.setupToolHandlers();
   }
 
+  // MCP clients enforce a hard 1 MB limit on tool results.
+  // We cap at 900 KB to leave headroom for JSON framing overhead.
+  private static readonly MAX_RESULT_BYTES = 900 * 1024;
+
   private serializeResult(result: any) {
     try {
+      const text = JSON.stringify(result, (key, value) =>
+        typeof value === 'bigint' ? value.toString() : value
+      );
+
+      if (Buffer.byteLength(text, 'utf8') > AbapAdtServer.MAX_RESULT_BYTES) {
+        return this.handleError(new McpError(
+          ErrorCode.InternalError,
+          'Tool result exceeds the 1 MB MCP limit. ' +
+          'For source code, use the chunkSize and chunkIndex parameters of ' +
+          'getObjectSource to read the file in smaller pieces. ' +
+          'For queries, reduce the result set with the rowNumber parameter.'
+        ));
+      }
+
       return {
-        content: [{
-          type: 'text',
-          text: JSON.stringify(result, (key, value) => 
-            typeof value === 'bigint' ? value.toString() : value
-          )
-        }]
+        content: [{ type: 'text', text }]
       };
     } catch (error) {
       return this.handleError(new McpError(
