@@ -32,7 +32,7 @@ const RUNNER_SOURCE_CRASHED = [
   '',
   'CLASS zcl_mcp_dyn_sql IMPLEMENTATION.',
   '  METHOD if_oo_adt_classrun~main.',
-  "    DATA(lv_sql) = `INSERT INTO ztable VALUES ('stale')`."],
+  "    DATA(lv_sql) = `INSERT INTO ztable VALUES ('stale')`.",
   '    out->write( |OK:1| ).',
   '  ENDMETHOD.',
   'ENDCLASS.',
