@@ -36,6 +36,7 @@ import { AtcHandlers } from './handlers/AtcHandlers.js';
 import { TraceHandlers } from './handlers/TraceHandlers.js';
 import { RefactorHandlers } from './handlers/RefactorHandlers.js';
 import { RevisionHandlers } from './handlers/RevisionHandlers.js';
+import { TableDmlHandlers } from './handlers/TableDmlHandlers.js';
 
 config({ path: path.resolve(__dirname, '../.env') });
 
@@ -66,6 +67,7 @@ export class AbapAdtServer extends Server {
     private traceHandlers: TraceHandlers;
     private refactorHandlers: RefactorHandlers;
     private revisionHandlers: RevisionHandlers;
+    private tableDmlHandlers: TableDmlHandlers;
 
     constructor() {
     super(
@@ -120,6 +122,7 @@ export class AbapAdtServer extends Server {
     this.traceHandlers = new TraceHandlers(this.adtClient);
     this.refactorHandlers = new RefactorHandlers(this.adtClient);
     this.revisionHandlers = new RevisionHandlers(this.adtClient);
+    this.tableDmlHandlers = new TableDmlHandlers(this.adtClient);
 
 
         // Setup tool handlers
@@ -214,6 +217,7 @@ export class AbapAdtServer extends Server {
             ...this.traceHandlers.getTools(),
             ...this.refactorHandlers.getTools(),
             ...this.revisionHandlers.getTools(),
+            ...this.tableDmlHandlers.getTools(),
             {
             name: 'healthcheck',
             description: 'Check server health and connectivity',
@@ -408,6 +412,9 @@ export class AbapAdtServer extends Server {
                 break;
             case 'revisions':
                 result = await this.revisionHandlers.handle(request.params.name, request.params.arguments);
+                break;
+            case 'executeDml':
+                result = await this.tableDmlHandlers.handle(request.params.name, request.params.arguments);
                 break;
             case 'healthcheck':
                 result = { status: 'healthy', timestamp: new Date().toISOString() };
