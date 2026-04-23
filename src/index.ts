@@ -349,6 +349,7 @@ export class AbapAdtServer extends Server {
             case 'bindingDetails':
                 result = await this.serviceBindingHandlers.handle(request.params.name, request.params.arguments);
                 break;
+            case 'getTableMetadata':
             case 'tableContents':
             case 'runQuery':
                 result = await this.queryHandlers.handle(request.params.name, request.params.arguments);
